@@ -4,6 +4,7 @@ accumulation, resumable checkpoints. Batches are random windows of the .bin file
     python train.py            # train with the constants below
     python train.py --check    # the checks that say the loop is correct
     python train.py --toy      # 2 layers, 128 dim: the whole path in minutes on a laptop
+    python train.py --data data/vocab8192 --pos learned ...   # ablation arms
 """
 
 import argparse
@@ -53,8 +54,8 @@ DEVICE = (
     else "cpu"
 )
 
-def split(name):
-    return np.memmap(f"{DATA}/{name}.bin", dtype=np.uint16, mode="r")
+def split(data, name):
+    return np.memmap(f"{data}/{name}.bin", dtype=np.uint16, mode="r")
 
 def batch(data, size, ctx, gen, device):
     """Random windows, sampled with replacement rather than by epoch permutation.
@@ -101,16 +102,22 @@ def autocast(device):
         return torch.autocast("cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
 
-def fingerprint():
+def fingerprint(data):
     """What the tokens were made of. Stored in every checkpoint so a rerun of
     the tokenizer cannot silently invalidate a resume or an eval."""
-    with open(f"{DATA}/tokenizer.model", "rb") as f:
+    with open(f"{data}/tokenizer.model", "rb") as f:
         merges = hashlib.blake2b(f.read(), digest_size=8).hexdigest()
     return {
         "tokenizer": merges,
-        "train_tokens": os.path.getsize(f"{DATA}/train.bin") // 2,
-        "val_tokens": os.path.getsize(f"{DATA}/val.bin") // 2,
+        "train_tokens": os.path.getsize(f"{data}/train.bin") // 2,
+        "val_tokens": os.path.getsize(f"{data}/val.bin") // 2,
     }
+
+def token_bytes(tok):
+    """Bytes of text behind each token id; 0 for the specials, which are not text."""
+    n = np.array([len(tok.vocab[i]) for i in range(len(tok.vocab))], dtype=np.int64)
+    n[list(tok.special.values())] = 0
+    return n
 
 def config(args):
     """Everything a resume has to agree on."""
@@ -120,7 +127,8 @@ def config(args):
         tokens_per_step=args.micro_batch * args.ctx * args.accum,
         peak_lr=args.lr, floor=FLOOR, weight_decay=WEIGHT_DECAY,
         betas=BETAS, grad_clip=GRAD_CLIP, seed=SEED,
-        n_layer=args.layers, dim=args.dim, n_head=args.heads, vocab=VOCAB_SIZE,
+        n_layer=args.layers, dim=args.dim, n_head=args.heads, vocab=args.vocab,
+        pos=args.pos,
     )
 
 @torch.no_grad()
@@ -137,6 +145,23 @@ def val_loss(model, data, args, batches=EVAL_BATCHES):
             total += model(x, y)[1].item()
     model.train(was_training)
     return total / batches
+
+@torch.no_grad()
+def val_bpb(model, data, nbytes, args):
+    """Bits per byte over the whole val split in back-to-back windows. Loss per
+    token cannot be compared across vocab sizes; bits per byte of the same text can."""
+    model.eval()
+    n = (len(data) - 1) // args.ctx
+    t = torch.from_numpy(data[: n * args.ctx + 1].astype(np.int64))
+    x, y = t[:-1].view(n, args.ctx), t[1:].view(n, args.ctx)
+    nats = 0.0
+    for i in range(0, n, args.micro_batch):
+        xb, yb = x[i:i + args.micro_batch], y[i:i + args.micro_batch]
+        with autocast(args.device):
+            loss = model(xb.to(args.device), yb.to(args.device))[1]
+        nats += loss.item() * yb.numel()
+    model.train()
+    return nats / math.log(2) / nbytes[y.numpy()].sum()
 
 def sample(model, tok, device, n=150):
     """Continue PROMPT from a fresh story, sampling until the story ends."""
@@ -164,14 +189,14 @@ def save(path, model, opt, gen, step, args, fp):
     if args.hub:
         # The instance disk dies with the instance; the Hub copy is the real one.
         from huggingface_hub import HfApi
-        HfApi().upload_file(path_or_fileobj=path, path_in_repo="ckpt.pt",
+        HfApi().upload_file(path_or_fileobj=path, path_in_repo=os.path.relpath(path, OUT),
                             repo_id=args.hub, commit_message=f"step {step}")
 
 def resume(path, model, opt, gen, fp, args):
     """Restore weights, Adam state and both RNGs; return the step to go on from."""
     if not os.path.exists(path) and args.hub:
         from huggingface_hub import hf_hub_download
-        hf_hub_download(args.hub, "ckpt.pt", local_dir=os.path.dirname(path))
+        hf_hub_download(args.hub, os.path.relpath(path, OUT), local_dir=OUT)
     # Onto the CPU whatever the device: load_state_dict moves tensors to where
     # the parameters already live, and the RNG states have to stay CPU bytes.
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
@@ -188,16 +213,20 @@ def resume(path, model, opt, gen, fp, args):
 def run(args):
     os.makedirs(args.out, exist_ok=True)
     path = f"{args.out}/ckpt.pt"
-    fp = fingerprint()
+    fp = fingerprint(args.data)
+    tok = tokenizer.load(f"{args.data}/tokenizer.model")
+    args.vocab = len(tok.vocab)
 
     torch.manual_seed(SEED)
-    model = Sprout(args.layers, args.dim, args.heads).to(args.device)
+    model = Sprout(args.layers, args.dim, args.heads, args.ctx, args.vocab, args.pos)
+    model = model.to(args.device)
     opt = optimizer(model, args.device)
     gen = torch.Generator().manual_seed(SEED)
     step = resume(path, model, opt, gen, fp, args) if args.resume else 0
 
-    train_data, val_data = split("train"), split("val")
-    tok = tokenizer.load()
+    train_data, val_data = split(args.data, "train"), split(args.data, "val")
+    nbytes = token_bytes(tok)
+    bytes_per_token = nbytes[val_data].sum() / len(val_data)
     tokens = args.micro_batch * args.ctx * args.accum
     stop = args.stop_after or args.steps
     epochs = args.steps * tokens / len(train_data)
@@ -212,10 +241,11 @@ def run(args):
         # opening a second one; WANDB_MODE=offline covers headless machines.
         commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                                 capture_output=True, text=True).stdout.strip()
-        wandb.init(project=PROJECT, config=config(args) | fp | {"commit": commit},
-                   resume="allow")
+        wandb.init(project=PROJECT, name=os.path.basename(args.out),
+                   config=config(args) | fp | {"commit": commit}, resume="allow")
 
     losses = open(f"{args.out}/losses.txt", "a")
+    vals = open(f"{args.out}/val.txt", "a")
     model.train()
     t0 = time.time()
     while step < stop:
@@ -249,13 +279,22 @@ def run(args):
 
         if step % EVAL_EVERY == 0 or step == stop:
             val = val_loss(model, val_data, args)
+            bpb = val / math.log(2) / bytes_per_token
             text = sample(model, tok, args.device)
-            print(f"step {step:6d}  val {val:.4f}\n{text}\n")
+            print(f"step {step} {val:.6f} {bpb:.6f}", file=vals, flush=True)
+            print(f"step {step:6d}  val {val:.4f}  bpb {bpb:.4f}\n{text}\n")
             if wandb:
-                wandb.log({"val_loss": val, "sample": wandb.Html(f"<pre>{text}</pre>")},
-                          step=step)
+                wandb.log({"val_loss": val, "val_bpb": bpb,
+                           "sample": wandb.Html(f"<pre>{text}</pre>")}, step=step)
         if step % CKPT_EVERY == 0 or step == stop:
             save(path, model, opt, gen, step, args, fp)
+
+    if step == args.steps:
+        bpb = val_bpb(model, val_data, nbytes, args)
+        print(f"final val bpb over all {len(val_data):,} val tokens: {bpb:.4f}")
+        print(f"final {bpb:.6f}", file=vals, flush=True)
+        if wandb:
+            wandb.summary["val_bpb_full"] = bpb
 
 def check_schedule():
     """Warmup rises to the peak, cosine falls to the floor."""
@@ -345,7 +384,7 @@ def check(args):
 
     torch.manual_seed(SEED)
     model = Sprout()
-    val_data = split("val")
+    val_data = split(DATA, "val")
     check_eval(model, val_data, args)
     check_accumulation(model, val_data)
     check_resume()
@@ -363,6 +402,8 @@ def parse():
     p.add_argument("--dim", type=int, default=DIM)
     p.add_argument("--heads", type=int, default=N_HEAD)
     p.add_argument("--lr", type=float, default=PEAK_LR)
+    p.add_argument("--data", default=DATA, help="directory of tokenizer.model, train.bin, val.bin")
+    p.add_argument("--pos", default="rope", choices=["rope", "learned"])
     p.add_argument("--out", default=OUT)
     p.add_argument("--hub", default=HUB)
     p.add_argument("--device", default=DEVICE)

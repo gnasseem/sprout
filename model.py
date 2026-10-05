@@ -97,10 +97,14 @@ class Block(nn.Module):
         return x + self.mlp(self.mlp_norm(x))
 
 class Sprout(nn.Module):
-    def __init__(self, n_layer=N_LAYER, dim=DIM, n_head=N_HEAD, ctx=CTX, vocab=VOCAB_SIZE):
+    def __init__(self, n_layer=N_LAYER, dim=DIM, n_head=N_HEAD, ctx=CTX, vocab=VOCAB_SIZE,
+                 pos="rope"):
         super().__init__()
+        assert pos in ("rope", "learned"), pos
         self.ctx = ctx
         self.tok_emb = nn.Embedding(vocab, dim)
+        # GPT-2's learned absolute positions, the alternative to RoPE.
+        self.pos_emb = nn.Embedding(ctx, dim) if pos == "learned" else None
         self.blocks = nn.ModuleList(Block(dim, n_head) for _ in range(n_layer))
         self.norm = RMSNorm(dim)
         self.head = nn.Linear(dim, vocab, bias=False)
@@ -114,6 +118,8 @@ class Sprout(nn.Module):
                 nn.init.normal_(w, std=INIT_STD / math.sqrt(2 * n_layer))
 
         cos, sin = rope_tables(dim // n_head, ctx)
+        if self.pos_emb is not None:
+            cos, sin = torch.ones_like(cos), torch.zeros_like(sin)  # rotation by 0
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -121,6 +127,8 @@ class Sprout(nn.Module):
         T = idx.shape[1]
         cos, sin = self.cos[:T], self.sin[:T]
         x = self.tok_emb(idx)
+        if self.pos_emb is not None:
+            x = x + self.pos_emb(torch.arange(T, device=idx.device))
         for block in self.blocks:
             x = block(x, cos, sin)
         logits = self.head(self.norm(x))
@@ -158,6 +166,10 @@ def main():
     print(f"params: {actual:,} (hand count {expected:,})")
     assert actual == expected, (actual, expected)
     assert model.head.weight is model.tok_emb.weight
+    with torch.random.fork_rng(devices=[]):  # leave the seeded checks below as they were
+        learned = sum(p.numel() for p in Sprout(pos="learned").parameters())
+    print(f"params with learned positions: {learned:,} (+ctx*dim = {CTX * DIM:,})")
+    assert learned == expected + CTX * DIM
 
     # RMSNorm against the definition written longhand.
     x = torch.randn(4, 7, DIM)

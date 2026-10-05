@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from collections import Counter, defaultdict
 from multiprocessing import Pool
 import numpy as np
@@ -6,7 +8,6 @@ import regex
 
 VOCAB_SIZE = 4096
 SPECIALS = ["<|endoftext|>", "<|user|>", "<|assistant|>", "<|end|>"]
-N_MERGES = VOCAB_SIZE - 256 - len(SPECIALS)
 SAMPLE_MB = 30
 STRIDE = 64
 OUT = "data"
@@ -31,8 +32,8 @@ def merge(ids, pair, new):
             i += 1
     return out
 
-def train(text):
-    """Learn N_MERGES pairs, in the order learned."""
+def train(text, n_merges):
+    """Learn n_merges pairs, in the order learned."""
     # Chunks are deduplicated and weighted by count: identical chunks always
     # merge identically, and 30MB holds only ~50k distinct ones.
     freq = Counter(PAT.findall(text))
@@ -47,7 +48,7 @@ def train(text):
             where[p].add(i)
 
     merges = []
-    for new in range(256, 256 + N_MERGES):
+    for new in range(256, 256 + n_merges):
         best = max(count, key=lambda p: (count[p], -p[0], -p[1]))  # ties: smallest pair
         merges.append(best)
         # Only the words containing best change: drop their pairs, merge, put
@@ -153,40 +154,45 @@ def encode_batch(batch):
         nbytes += len(s.encode("utf-8"))
     return np.array(ids, dtype=np.uint16), nbytes, len(ids) - len(batch)
 
-def tokenize(name, merges):
-    """Write data/<name>.bin, return its byte and token counts."""
+def tokenize(name, merges, out):
+    """Write <out>/<name>.bin, return its byte and token counts."""
     ntok = nbytes = 0
     with Pool(initializer=init_worker, initargs=(merges,)) as pool:
-        with open(f"{OUT}/{name}.bin", "wb") as out:
+        with open(f"{out}/{name}.bin", "wb") as f:
             for arr, nb, nt in pool.imap(encode_batch, batches(f"{OUT}/{name}.jsonl")):
-                out.write(arr.tobytes())
+                f.write(arr.tobytes())
                 nbytes += nb
                 ntok += nt
     return nbytes, ntok
 
 def main():
+    # Any other vocab size goes in its own directory, next to the same jsonl.
+    vocab = int(sys.argv[1]) if len(sys.argv) > 1 else VOCAB_SIZE
+    out = OUT if vocab == VOCAB_SIZE else f"{OUT}/vocab{vocab}"
+    os.makedirs(out, exist_ok=True)
+    n_merges = vocab - 256 - len(SPECIALS)
+
     text = sample(f"{OUT}/train.jsonl", SAMPLE_MB, STRIDE)
     print(f"training on {len(text) / 1e6:.1f}MB, {len(set(PAT.findall(text))):,} chunks")
-    merges = train(text)
-    save(merges, f"{OUT}/tokenizer.model")
+    merges = train(text, n_merges)
+    save(merges, f"{out}/tokenizer.model")
 
-    tok = load()
-    assert len(tok.vocab) == VOCAB_SIZE, len(tok.vocab)
+    tok = load(f"{out}/tokenizer.model")
+    assert len(tok.vocab) == vocab, len(tok.vocab)
     word = tok.encode("story")
     for s in SPECIALS:
         assert tok.encode(f"story{s}story") == word + [tok.special[s]] + word, s
 
-    step = N_MERGES // 18
+    step = n_merges // 18
     print("vocab:", ", ".join(repr(tok.vocab[i].decode("utf-8", "replace"))
-                              for i in range(256, 256 + N_MERGES, step)))
+                              for i in range(256, 256 + n_merges, step)))
 
     for name in ("val", "train"):
-        nbytes, ntok = tokenize(name, merges)
+        nbytes, ntok = tokenize(name, merges, out)
         print(f"{name}: {ntok:,} tokens, {nbytes / ntok:.3f} bytes/token")
 
-    ids = np.memmap(f"{OUT}/train.bin", dtype=np.uint16, mode="r")[:220]
+    ids = np.memmap(f"{out}/train.bin", dtype=np.uint16, mode="r")[:220]
     print("\n" + tok.decode(ids.tolist()))
-
 
 if __name__ == "__main__":
     main()
