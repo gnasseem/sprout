@@ -147,21 +147,33 @@ def val_loss(model, data, args, batches=EVAL_BATCHES):
     return total / batches
 
 @torch.no_grad()
-def val_bpb(model, data, nbytes, args):
-    """Bits per byte over the whole val split in back-to-back windows. Loss per
-    token cannot be compared across vocab sizes; bits per byte of the same text can."""
+def val_metrics(model, data, nbytes, args):
+    """Cross-entropy and bits per byte in consecutive windows, including the tail.
+    Every token after the first is a target; special tokens count as zero bytes."""
+    assert len(data) > 1
+    was_training = model.training
     model.eval()
-    n = (len(data) - 1) // args.ctx
-    t = torch.from_numpy(data[: n * args.ctx + 1].astype(np.int64))
-    x, y = t[:-1].view(n, args.ctx), t[1:].view(n, args.ctx)
+    ntokens = len(data) - 1
     nats = 0.0
-    for i in range(0, n, args.micro_batch):
-        xb, yb = x[i:i + args.micro_batch], y[i:i + args.micro_batch]
-        with autocast(args.device):
-            loss = model(xb.to(args.device), yb.to(args.device))[1]
-        nats += loss.item() * yb.numel()
-    model.train()
-    return nats / math.log(2) / nbytes[y.numpy()].sum()
+    start = 0
+    try:
+        while start < ntokens:
+            width = min(args.ctx, ntokens - start)
+            count = min(args.micro_batch, (ntokens - start) // width)
+            t = torch.from_numpy(data[start:start + count * width + 1].astype(np.int64))
+            x, y = t[:-1].view(count, width), t[1:].view(count, width)
+            with autocast(args.device):
+                loss = model(x.to(args.device), y.to(args.device))[1]
+            nats += loss.item() * y.numel()
+            start += y.numel()
+    finally:
+        model.train(was_training)
+    ntext = int(nbytes[data[1:]].sum())
+    assert ntext > 0
+    return nats / ntokens, nats / math.log(2) / ntext
+
+def val_bpb(model, data, nbytes, args):
+    return val_metrics(model, data, nbytes, args)[1]
 
 def sample(model, tok, device, n=150):
     """Continue PROMPT from a fresh story, sampling until the story ends."""

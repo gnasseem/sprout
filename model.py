@@ -137,11 +137,16 @@ class Sprout(nn.Module):
         return logits, F.cross_entropy(logits.flatten(0, 1), targets.flatten())
 
     @torch.no_grad()
-    def generate(self, idx, n, temperature=1.0, stop=None):
+    def generate(self, idx, n, temperature=1.0, stop=None, top_k=None):
         """Sample n tokens after idx, (B, T); halts early once every row hit stop."""
+        assert temperature > 0, temperature
+        assert top_k is None or 0 < top_k <= self.head.out_features, top_k
         start = idx.shape[1]
         for _ in range(n):
             logits = self(idx[:, -self.ctx:])[0][:, -1] / temperature
+            if top_k is not None:
+                cutoff = logits.topk(top_k, dim=-1).values[:, -1:]
+                logits = logits.masked_fill(logits < cutoff, float("-inf"))
             nxt = torch.multinomial(logits.softmax(-1), 1)
             idx = torch.cat([idx, nxt], dim=1)
             if stop is not None and (idx[:, start:] == stop).any(1).all():
