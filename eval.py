@@ -102,7 +102,7 @@ def main():
             assert (text, ids, ended) == repeated, "seeded sampling did not reproduce"
         print(json.dumps(dict(prompt_id=i + 1, prompt=prompt, continuation=text,
                               token_ids=ids, seed=seed, temperature=args.temperature,
-                              top_k=args.top_k, max_tokens=args.max_tokens,
+                              top_k=args.top_k, max_tokens=args.max_tokens, use_cache=True,
                               generated_tokens=len(ids), ended=ended), ensure_ascii=False),
               flush=True)
 

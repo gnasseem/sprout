@@ -86,3 +86,18 @@ Evaluation uses the first 20 valid, in-context official validation records conta
 The untuned main checkpoint's October 8 MPS float32 baseline included all requested words in 0/20 prompts, the exact requested sentence in 0/20, and emitted the chat end token in 0/20. It often emitted the pretraining end-of-text token and continued with another story. Full base validation remained 1.091364 nats/token and 0.391208 bits/byte. The complete outputs are in `checkpoints/main/instruct-eval.txt`; tuned results remain pending the GPU run.
 
 The inline checks verify the shifted masking boundary, final end label, zero logit gradients at ignored positions, unequal-length accumulation, and Unicode template round-trip. A local three-step training run with a partial final batch reproduced exactly after save/resume. A CPU update of the main pretrained checkpoint reduced a held-out smoke example's loss from 0.977750 to 0.703327; those temporary weights were discarded.
+
+## Cached generation
+
+`model.generate()` uses a KV cache by default; `use_cache=False` runs the full-prefix reference. Set `temperature=0` for greedy decoding. `model.generate_tokens()` yields one `(batch, 1)` token tensor at a time for streaming. Each iterator owns its cache, and finished batch rows emit only the stop token while the other rows continue.
+
+`model.forward_cached(tokens, cache=None)` returns chunk logits and a tuple of per-layer `(K, V)` tensors, each shaped `(batch, heads, cached_tokens, head_dim)`. RoPE and learned positions start at the cached prefix length, and multi-token chunks use an offset causal mask. Caching requires `model.eval()` and runs without gradients. Training and checkpoint weights use the same format as before.
+
+At the 512-token context limit, generation rebuilds the cache from the last 512 tokens at position zero. Simply dropping the oldest keys would retain hidden states from a different context and change predictions. This rebuild matches uncached sliding-window generation but loses the speedup once the window is full. Instruction generation already limits the continuation to keep the complete prompt visible.
+
+```bash
+python model.py --check-cache --device cpu
+python model.py --check-cache --device mps
+```
+
+The checks passed on CPU and MPS and cover 224 exact greedy token matches for both position encodings, context rollover, chunk logits, streaming, and batched stopping. The main pretrained checkpoint also matched 256 greedy tokens exactly on both devices in float32, plus 24 tokens from a 500-token prefix across rollover on CPU. On this laptop with four CPU threads, the 256-token run took 6.234 seconds uncached and 1.779 seconds cached (3.50× faster).

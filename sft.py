@@ -347,7 +347,7 @@ def evaluate(args):
         totals.update(dict(prompts=1, all_words=int(all(included)), sentence=int(sentence), ended=int(ended)))
         print(json.dumps(dict(prompt_id=i + 1, fields=fields, continuation=result,
                               token_ids=ids, seed=SEED + i, temperature=0.8, top_k=50,
-                              max_tokens=limit, words_included=included,
+                              max_tokens=limit, use_cache=True, words_included=included,
                               sentence_included=sentence, ended=ended), ensure_ascii=False), flush=True)
     print(json.dumps(dict(behavior=dict(totals))), flush=True)
 

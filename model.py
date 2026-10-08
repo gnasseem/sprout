@@ -2,6 +2,7 @@
 SwiGLU, no biases, tied embeddings. Running this file checks the pieces and
 then overfits one batch."""
 
+import argparse
 import math
 import time
 
@@ -65,14 +66,26 @@ class Attention(nn.Module):
         self.wv = nn.Linear(dim, dim, bias=False)
         self.wo = nn.Linear(dim, dim, bias=False)
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, cache=None, use_cache=False):
         B, T, C = x.shape
         q = self.wq(x).view(B, T, self.n_head, -1).transpose(1, 2)
         k = self.wk(x).view(B, T, self.n_head, -1).transpose(1, 2)
         v = self.wv(x).view(B, T, self.n_head, -1).transpose(1, 2)
         q, k = rope(q, cos, sin), rope(k, cos, sin)  # position enters via q, k only
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        return self.wo(y.transpose(1, 2).reshape(B, T, C))
+        past = 0 if cache is None else cache[0].shape[2]
+        if cache is not None:
+            k = torch.cat([cache[0], k], dim=2)
+            v = torch.cat([cache[1], v], dim=2)
+        if past and T > 1:
+            # Cached chunks need a causal mask offset by the prefix length.
+            mask = torch.arange(k.shape[2], device=x.device)[None, :] <= (
+                past + torch.arange(T, device=x.device)[:, None])
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        else:
+            # A single new query can see the entire cache. is_causal=True
+            # would align it with the FIRST key rather than the last one.
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=past == 0)
+        return self.wo(y.transpose(1, 2).reshape(B, T, C)), (k, v) if use_cache else None
 
 class MLP(nn.Module):
     def __init__(self, dim):
@@ -92,9 +105,10 @@ class Block(nn.Module):
         self.mlp_norm = RMSNorm(dim)
         self.mlp = MLP(dim)
 
-    def forward(self, x, cos, sin):
-        x = x + self.attn(self.attn_norm(x), cos, sin)
-        return x + self.mlp(self.mlp_norm(x))
+    def forward(self, x, cos, sin, cache=None, use_cache=False):
+        attention, cache = self.attn(self.attn_norm(x), cos, sin, cache, use_cache)
+        x = x + attention
+        return x + self.mlp(self.mlp_norm(x)), cache
 
 class Sprout(nn.Module):
     def __init__(self, n_layer=N_LAYER, dim=DIM, n_head=N_HEAD, ctx=CTX, vocab=VOCAB_SIZE,
@@ -123,41 +137,128 @@ class Sprout(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, idx, targets=None):
+    def _hidden(self, idx, cache=None, use_cache=False):
         T = idx.shape[1]
-        cos, sin = self.cos[:T], self.sin[:T]
+        if cache is not None:
+            assert use_cache and len(cache) == len(self.blocks)
+        offset = 0 if cache is None else cache[0][0].shape[2]
+        assert 0 < T and offset + T <= self.ctx, "input exceeds the model context"
+        if cache is not None:
+            for k, v in cache:
+                assert k.shape == v.shape == (idx.shape[0], self.blocks[0].attn.n_head,
+                                               offset, self.cos.shape[1])
+                assert k.device == v.device == idx.device
+        cos, sin = self.cos[offset:offset + T], self.sin[offset:offset + T]
         x = self.tok_emb(idx)
         if self.pos_emb is not None:
-            x = x + self.pos_emb(torch.arange(T, device=idx.device))
-        for block in self.blocks:
-            x = block(x, cos, sin)
-        logits = self.head(self.norm(x))
+            x = x + self.pos_emb(torch.arange(offset, offset + T, device=idx.device))
+        updated = []
+        for i, block in enumerate(self.blocks):
+            x, entry = block(x, cos, sin, None if cache is None else cache[i], use_cache)
+            if use_cache:
+                updated.append(entry)
+        return self.norm(x), tuple(updated)
+
+    def forward(self, idx, targets=None):
+        logits = self.head(self._hidden(idx)[0])
         if targets is None:
             return logits, None
         return logits, F.cross_entropy(logits.flatten(0, 1), targets.flatten())
 
     @torch.no_grad()
-    def generate(self, idx, n, temperature=1.0, stop=None, top_k=None):
-        """Sample n tokens after idx, (B, T); halts early once every row hit stop."""
-        assert temperature > 0, temperature
+    def forward_cached(self, idx, cache=None):
+        """Return chunk logits and per-layer (K, V), each (B, heads, T, head_dim)."""
+        assert not self.training, "KV caching requires model.eval()"
+        x, cache = self._hidden(idx, cache, use_cache=True)
+        return self.head(x), cache
+
+    @torch.no_grad()
+    def generate_tokens(self, idx, n, temperature=1.0, stop=None, top_k=None, use_cache=True):
+        """Yield (B, 1) token tensors; cache lives only in this iterator."""
+        assert not self.training, "generation requires model.eval()"
+        assert idx.ndim == 2 and idx.shape[0] > 0 and idx.shape[1] > 0
+        assert n >= 0 and temperature >= 0, (n, temperature)
         assert top_k is None or 0 < top_k <= self.head.out_features, top_k
-        start = idx.shape[1]
+        assert stop is None or 0 <= stop < self.head.out_features, stop
+        cache = None
+        finished = torch.zeros(idx.shape[0], dtype=torch.bool, device=idx.device)
         for _ in range(n):
-            logits = self(idx[:, -self.ctx:])[0][:, -1] / temperature
-            if top_k is not None:
-                cutoff = logits.topk(top_k, dim=-1).values[:, -1:]
-                logits = logits.masked_fill(logits < cutoff, float("-inf"))
-            nxt = torch.multinomial(logits.softmax(-1), 1)
+            if use_cache:
+                if cache is None or cache[0][0].shape[2] == self.ctx:
+                    # Sliding the window changes every retained hidden state.
+                    # Rebuild it at position zero to match uncached generation.
+                    logits, cache = self.forward_cached(idx[:, -self.ctx:])
+                else:
+                    logits, cache = self.forward_cached(idx[:, -1:], cache)
+                logits = logits[:, -1]
+            else:
+                logits = self(idx[:, -self.ctx:])[0][:, -1]
+            if temperature == 0:
+                nxt = logits.argmax(-1, keepdim=True)
+            else:
+                logits = logits / temperature
+                if top_k is not None:
+                    cutoff = logits.topk(top_k, dim=-1).values[:, -1:]
+                    logits = logits.masked_fill(logits < cutoff, float("-inf"))
+                nxt = torch.multinomial(logits.softmax(-1), 1)
+            if stop is not None:
+                nxt = nxt.masked_fill(finished[:, None], stop)
+                finished |= nxt[:, 0] == stop
             idx = torch.cat([idx, nxt], dim=1)
-            if stop is not None and (idx[:, start:] == stop).any(1).all():
+            yield nxt
+            if stop is not None and finished.all():
                 break
-        return idx
+
+    @torch.no_grad()
+    def generate(self, idx, n, temperature=1.0, stop=None, top_k=None, use_cache=True):
+        """Append up to n tokens; temperature=0 selects greedy decoding."""
+        tokens = list(self.generate_tokens(idx, n, temperature, stop, top_k, use_cache))
+        return torch.cat([idx, *tokens], dim=1) if tokens else idx
 
 def init_weights(module):
     if isinstance(module, (nn.Linear, nn.Embedding)):
         nn.init.normal_(module.weight, std=INIT_STD)
 
-def main():
+
+@torch.no_grad()
+def check_cache(device):
+    """Check cached chunks, sliding windows, streaming, and batched stopping."""
+    torch.manual_seed(1337)
+    for pos in ("rope", "learned"):
+        model = Sprout(n_layer=2, dim=32, n_head=4, ctx=64, vocab=256, pos=pos).to(device).eval()
+        idx = torch.randint(256, (2, 13), device=device)
+        ref = model(idx)[0]
+        first, cache = model.forward_cached(idx[:, :5])
+        single, cache = model.forward_cached(idx[:, 5:6], cache)
+        last, cache = model.forward_cached(idx[:, 6:], cache)
+        logits = torch.cat([first, single, last], dim=1)
+        error = (logits - ref).abs().max().item()
+        assert torch.allclose(logits, ref, atol=1e-6, rtol=1e-5), error
+        assert all(k.shape == v.shape == (2, 4, 13, 8) for k, v in cache)
+        assert all(not k.requires_grad and not v.requires_grad for k, v in cache)
+
+        cached = model.generate(idx, 224, temperature=0)
+        plain = model.generate(idx, 224, temperature=0, use_cache=False)
+        assert torch.equal(cached, plain), (cached != plain).nonzero()
+        # A prefix longer than the context must use exactly the final window.
+        assert torch.equal(model.generate(cached, 3, temperature=0),
+                           model.generate(cached, 3, temperature=0, use_cache=False))
+        assert torch.equal(model.generate(idx, 0), idx)
+        tokens = list(model.generate_tokens(idx, 224, temperature=0))
+        assert torch.equal(torch.cat([idx, *tokens], dim=1), cached)
+
+        stop = int(cached[0, idx.shape[1]])
+        stopped = model.generate(idx, 32, temperature=0, stop=stop)
+        assert (stopped[0, idx.shape[1]:] == stop).all()
+        assert torch.equal(stopped, model.generate(idx, 32, temperature=0, stop=stop,
+                                                  use_cache=False))
+        if stopped.shape[1] < idx.shape[1] + 32:
+            assert (stopped[:, -1] == stop).all()
+        print(f"{pos} on {device}: 224 greedy tokens match exactly across context rollover; "
+              f"chunk error {error:.2e}; streaming and batched stopping pass")
+
+def main(device):
+    check_cache(device)
     torch.manual_seed(1337)
     model = Sprout()
 
@@ -236,11 +337,6 @@ def main():
 
     # Overfit one batch, the only check that runs backward. 32x128 rather than
     # the full context, which needs ~9GB of activations.
-    device = (
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
     model = Sprout().to(device)
     model.train()
     seq = 128
@@ -263,4 +359,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-cache", action="store_true")
+    parser.add_argument("--device", choices=("cpu", "mps", "cuda"), default=(
+        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
+    args = parser.parse_args()
+    if args.check_cache:
+        check_cache(args.device)
+    else:
+        main(args.device)
