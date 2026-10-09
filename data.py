@@ -7,6 +7,7 @@ SEED = b"sprout-v1-split"
 VAL_FRAC = 0.01
 OUT = "data"
 SEP = "<|endoftext|>"
+REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
 
 def is_val(story):
     """Returns True if the story should be held out for validation, False otherwise."""
@@ -35,6 +36,7 @@ def main():
         "roneneldan/TinyStories",
         "TinyStoriesV2-GPT4-train.txt",
         repo_type="dataset",
+        revision=REVISION,
         local_dir=OUT,
     )
 
