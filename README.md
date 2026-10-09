@@ -63,13 +63,13 @@ These are examples from the fixed suite, not a scored quality benchmark. The com
 
 ## Instruction tuning
 
-`sft.py` prepares [TinyStoriesInstruct](https://huggingface.co/datasets/roneneldan/TinyStoriesInstruct/tree/ee050ed1f8720795be342921335e821856a2b42e), trains the pretrained model with assistant-only loss, and evaluates word inclusion, exact sentence inclusion, stopping, and base-model validation regression. The full instruction-tuning run requires the A100 and has not run yet.
+`sft.py` prepares [TinyStoriesInstruct](https://huggingface.co/datasets/roneneldan/TinyStoriesInstruct/tree/ee050ed1f8720795be342921335e821856a2b42e), trains the pretrained model with assistant-only loss, and evaluates word inclusion, exact sentence inclusion, stopping, and base-model validation regression. The first full run completed on October 9, 2026: one shuffled epoch, 18,457 optimizer steps, 2,362,399 conversations, and 457,894,671 supervised assistant tokens. The finished [W&B run](https://wandb.ai/george-nasseem/sprout/runs/rb9ndxvw) records commit `48aa20c` and 5,335 seconds of runtime (about 89 minutes).
 
 The exact conversation is `"<|user|>\n{instruction}<|end|>\n<|assistant|>\n{story}<|end|>"`. The instruction starts with `"Write a short story.\n"`, followed by the available `Summary:`, `Words:`, `Random sentence:`, and `Features:` lines in that order, with no trailing newline. `prompt()` produces the identical prefix for training and generation. Labels ignore the prompt and right padding; the last prompt position predicts the first assistant token, and the assistant's final `<|end|>` is supervised. Causal attention prevents right padding from influencing real tokens.
 
-Preparation pins the source revision, parses metadata on either side of `Story:`, and removes malformed records, reserved-token content, and whitespace-equivalent duplicate stories. The official instruction validation stories are excluded from instruction training, as are stories in the existing base validation split. Complete conversations longer than 512 prediction positions are excluded rather than teaching an artificial early ending. This favors shorter stories. The local validation preparation retained 23,833 of 25,027 records (4,592,270 assistant tokens); it excluded 34 malformed records, 1,019 over-context records, and 141 duplicates or base-validation overlaps.
+Preparation pins the source revision, parses metadata on either side of `Story:`, and removes malformed records, reserved-token content, and whitespace-equivalent duplicate stories. The official instruction validation stories are excluded from instruction training, as are stories in the existing base validation split. Complete conversations longer than 512 prediction positions are excluded rather than teaching an artificial early ending. This favors shorter stories. Validation preparation retained 23,833 of 25,027 records (4,592,270 assistant tokens); it excluded 34 malformed records, 1,019 over-context records, and 141 duplicates or base-validation overlaps. Training preparation excluded 3,458 malformed records, 97,915 over-context records, and 12,761 duplicates or validation overlaps from 2,476,533 source records.
 
-Run on the CUDA machine with the existing data and main checkpoint available; preparation needs space for the 2.66 GB source and its tokenized copy:
+Run on the CUDA machine with the existing data and main checkpoint available; preparation needs space for the 2.66 GB source and its tokenized copy. Also copy `data/val.jsonl` from the original split to the machine: it is required to exclude base-validation stories and is absent from the prepared-data Hub repository.
 
 ```bash
 python sft.py --prepare
@@ -83,7 +83,19 @@ The default is one shuffled epoch, seed 1337, learning rate 3e-5, up to 100 warm
 
 Evaluation uses the first 20 valid, in-context official validation records containing both words and a sentence constraint, with fixed seeds 1337–1356, temperature 0.8, and top-k 50. Generation stays within the trained context so the instruction remains visible. Outputs retain all token IDs, full continuations, settings, case-insensitive whole-word inclusion, exact sentence inclusion, and whether `<|end|>` was emitted. Run base and tuned evaluation on the same device and precision; compare full base validation loss as well as instruction metrics. Summary fidelity still requires reading the continuations.
 
-The untuned main checkpoint's October 8 MPS float32 baseline included all requested words in 0/20 prompts, the exact requested sentence in 0/20, and emitted the chat end token in 0/20. It often emitted the pretraining end-of-text token and continued with another story. Full base validation remained 1.091364 nats/token and 0.391208 bits/byte. The complete outputs are in `checkpoints/main/instruct-eval.txt`; tuned results remain pending the GPU run.
+On October 9, both models were evaluated on CUDA with PyTorch `2.11.0+cu128`, bf16 autocast, and batches of 8, using the identical 20 prompts and sampling settings:
+
+| Metric | Pretrained main model | Instruction-tuned model |
+| --- | ---: | ---: |
+| All requested words included | 0/20 | 6/20 |
+| Exact requested sentence included | 1/20 | 4/20 |
+| Assistant `<\|end\|>` emitted | 0/20 | 19/20 |
+| Full base-validation loss, nats/token | 1.091467 | 1.220414 |
+| Full base-validation bits per byte | 0.391245 | 0.437467 |
+
+Instruction validation loss fell from 1.419628 before tuning to 0.956147 at step 18,457, which is both the final and best checkpoint. Stopping improved strongly, but most word and sentence constraints still fail. Base-validation loss rose by 11.81%; this run demonstrates a tradeoff rather than reliable instruction following. The CUDA baseline differs slightly from the earlier MPS float32 evaluation, which scored 0/20 on all three behavioral metrics; comparisons above use the matching CUDA evaluation.
+
+Complete outputs are retained locally in `checkpoints/main/instruct-eval-cuda.txt` and `checkpoints/sft/instruct-eval.txt`, with preparation and training logs in `checkpoints/sft-prepare.txt`, `checkpoints/sft.log`, and `checkpoints/sft/losses.txt`. Both local checkpoints match the SHA-256 hashes of `sft/best.pt` and `sft/ckpt.pt` in the private [checkpoint repository](https://huggingface.co/GeorgeCodesSometimes/sprout-checkpoints). The best checkpoint also loads with the original tokenizer/data fingerprint and generates on CPU. No public model repository or demo has been published yet.
 
 The inline checks verify the shifted masking boundary, final end label, zero logit gradients at ignored positions, unequal-length accumulation, and Unicode template round-trip. A local three-step training run with a partial final batch reproduced exactly after save/resume. A CPU update of the main pretrained checkpoint reduced a held-out smoke example's loss from 0.977750 to 0.703327; those temporary weights were discarded.
 
