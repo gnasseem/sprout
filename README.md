@@ -95,7 +95,7 @@ On October 9, both models were evaluated on CUDA with PyTorch `2.11.0+cu128`, bf
 
 Instruction validation loss fell from 1.419628 before tuning to 0.956147 at step 18,457, which is both the final and best checkpoint. Stopping improved strongly, but most word and sentence constraints still fail. Base-validation loss rose by 11.81%; this run demonstrates a tradeoff rather than reliable instruction following. The CUDA baseline differs slightly from the earlier MPS float32 evaluation, which scored 0/20 on all three behavioral metrics; comparisons above use the matching CUDA evaluation.
 
-Complete outputs are retained locally in `checkpoints/main/instruct-eval-cuda.txt` and `checkpoints/sft/instruct-eval.txt`, with preparation and training logs in `checkpoints/sft-prepare.txt`, `checkpoints/sft.log`, and `checkpoints/sft/losses.txt`. Both local checkpoints match the SHA-256 hashes of `sft/best.pt` and `sft/ckpt.pt` in the private [checkpoint repository](https://huggingface.co/GeorgeCodesSometimes/sprout-checkpoints). The best checkpoint also loads with the original tokenizer/data fingerprint and generates on CPU. No public model repository or demo has been published yet.
+Complete outputs are retained locally in `checkpoints/main/instruct-eval-cuda.txt` and `checkpoints/sft/instruct-eval.txt`, with preparation and training logs in `checkpoints/sft-prepare.txt`, `checkpoints/sft.log`, and `checkpoints/sft/losses.txt`. Both local checkpoints match the SHA-256 hashes of `sft/best.pt` and `sft/ckpt.pt` in the private [checkpoint repository](https://huggingface.co/GeorgeCodesSometimes/sprout-checkpoints). The best checkpoint also loads with the original tokenizer/data fingerprint and generates on CPU. A standalone export and streaming Gradio demo are implemented below; neither has been published publicly.
 
 The inline checks verify the shifted masking boundary, final end label, zero logit gradients at ignored positions, unequal-length accumulation, and Unicode template round-trip. A local three-step training run with a partial final batch reproduced exactly after save/resume. A CPU update of the main pretrained checkpoint reduced a held-out smoke example's loss from 0.977750 to 0.703327; those temporary weights were discarded.
 
@@ -113,3 +113,33 @@ python model.py --check-cache --device mps
 ```
 
 The checks passed on CPU and MPS and cover 224 exact greedy token matches for both position encodings, context rollover, chunk logits, streaming, and batched stopping. The main pretrained checkpoint also matched 256 greedy tokens exactly on both devices in float32, plus 24 tokens from a 500-token prefix across rollover on CPU. On this laptop with four CPU threads, the 256-token run took 6.234 seconds uncached and 1.779 seconds cached (3.50× faster).
+
+## Portable inference and demo
+
+Export the best instruction checkpoint into a new, empty directory and run the CPU demo:
+
+```bash
+python -m pip install -r requirements.txt
+python export.py --checkpoint checkpoints/sft/best.pt --out checkpoints/release
+python app.py --model checkpoints/release
+```
+
+Open `http://127.0.0.1:7860`. The model loads once at startup; requests stream plain text through its KV cache. Story idea, words, sentence, and features use the exact training template shared with `sft.py`. Temperature, top-k, a generation limit, and cancellation are exposed. Requests run serially with a bounded queue. Empty fields, reserved-token injection, and oversized instructions produce actionable errors; instructions remain visible throughout generation. UTF-8 byte fragments are buffered until a character is complete.
+
+`export.py` verifies the checkpoint/data fingerprint before writing float32 safetensors, architecture and checksum configuration, the original tokenizer merges, the inference source files, dependencies, license, and model card. Optimizer state and training data are excluded. The tied embedding/output weight is stored once and restored as a shared tensor. The export checks 64 exact greedy continuation tokens against the checkpoint. The default weights occupy 117,482,344 bytes.
+
+The whole bundle can be copied to a machine without the training files. From inside that copied directory:
+
+```python
+from inference import load, stream
+
+model, tok, config = load(".")
+for text in stream(model, tok, {"Summary": "A fox finds a seed."}):
+    print(text, end="\r", flush=True)
+```
+
+`load` also accepts a Hugging Face model ID with an optional `revision` commit. It downloads only weights, configuration, and tokenizer files, verifies both SHA-256 checksums, and uses the included local Python implementation. This is a custom PyTorch loading contract, not a Transformers `AutoModel` integration. See the [Hub upload documentation](https://huggingface.co/docs/hub/models-uploading) and [safetensors tied-weight documentation](https://huggingface.co/docs/safetensors/torch_shared_tensors).
+
+For a model repository, upload the exported directory with its generated `README.md`. For a Gradio Space, upload the same files but use `SPACE.md` as the Space's `README.md`; its frontmatter pins Gradio 6.30.0 and Python 3.11. The app honors Gradio's server-address environment setting; `python app.py --host 0.0.0.0` supports other containers. The [Spaces runtime](https://huggingface.co/docs/hub/spaces-sdks-gradio) installs the listed dependencies and runs `app.py`. No upload is performed by the export or demo commands.
+
+On October 9, 2026, an isolated, freshly installed environment with PyTorch 2.14.1 and Gradio 6.30.0 loaded the copied bundle offline, generated and streamed on CPU, built the queued demo, and rejected a modified tokenizer. Browser generation and cancellation passed at 1440-pixel desktop and 390-pixel mobile widths without horizontal overflow. HTTP checks covered omitted optional fields, Unicode and nonsense prompts, and actionable errors for empty, injected, and oversized inputs. The existing template/masking checks also passed after sharing the prompt implementation. Hub download and hosted Space startup still require publication. The final project write-up still needs the architecture and tokenizer breakdowns, complete cost accounting, loss-curve plots, and limitations consolidated with exact reproduction commands.

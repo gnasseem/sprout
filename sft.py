@@ -22,14 +22,13 @@ import torch
 import tokenizer
 from data import stories
 from eval import load
+from inference import FIELDS, TEMPLATE, instruction, prompt
 from model import Sprout
 from train import (BETAS, DEVICE, GRAD_CLIP, SEED, WEIGHT_DECAY, autocast, fingerprint, lr_at,
                    optimizer, split, token_bytes, val_metrics)
 
 REPO = "roneneldan/TinyStoriesInstruct"
 REVISION = "ee050ed1f8720795be342921335e821856a2b42e"
-TEMPLATE = "<|user|>\n{instruction}<|end|>\n<|assistant|>\n"
-FIELDS = ("Summary", "Words", "Random sentence", "Features")
 FIELD = re.compile(r"^(Summary|Words|Random sentence|Features):\s*(.*)$")
 
 
@@ -63,15 +62,6 @@ def parse(text):
     if any(s in story or any(s in v for v in fields.values()) for s in tokenizer.SPECIALS):
         raise ValueError("reserved token in content")
     return fields, story
-
-
-def instruction(fields):
-    return "Write a short story.\n" + "\n".join(
-        f"{key}: {fields[key]}" for key in FIELDS if fields.get(key))
-
-
-def prompt(tok, fields):
-    return tok.encode(TEMPLATE.format(instruction=instruction(fields)))
 
 
 def encode(tok, fields, story):
