@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#174f40">
+  <meta name="description" content="Meet Sprout, a 29.4 million parameter story model trained from scratch. Write a story with the real model, directly in your browser.">
+  <title>Sprout — a small model learning to tell stories</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath fill='%23174f40' d='M20 35V20C5 22 2 12 3 5c13-1 19 5 17 15C18 9 26 3 37 4c1 11-6 19-17 16'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./demo.js"></script>
+</head>
+<body>
+  <a class="skip" href="#workshop">Skip to the story workshop</a>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="Sprout home">
+      <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 35V20C5 22 2 12 3 5c13-1 19 5 17 15C18 9 26 3 37 4c1 11-6 19-17 16"/></svg>
+      Sprout
+    </a>
+    <nav aria-label="Project links"><a href="https://github.com/gnasseem/sprout">Source</a><a href="https://huggingface.co/GeorgeCodesSometimes/sprout-instruct">Model weights</a></nav>
+  </header>
+  <main>
+    <section class="intro">
+      <div><h1>A small model.<br>A little imagination.</h1><p>Sprout learned to tell stories from scratch.<br>Give it an idea. See what grows.</p></div>
+      <div class="intro-note"><span class="dot"></span> An open research experiment<p>29.4 million parameters. Simple English stories.<br>The real model, running on your device.</p></div>
+    </section>
+    <section id="workshop" class="workshop" aria-label="Story workshop">
+      <form id="story-form" class="controls">
+        <h2>Plant an idea</h2>
+        <label for="summary">What is your story about?</label>
+        <textarea id="summary" name="Summary" rows="4" maxlength="4096" placeholder="A little fox plants a seed and learns to be patient."></textarea>
+        <div class="examples" aria-label="Example ideas"><button type="button" data-example="A little fox plants a seed and learns to be patient.">A patient fox</button><button type="button" data-example="Two friends find a red box beneath an old tree.">A mysterious box</button><button type="button" data-example="A tiny dragon learns that blowing bubbles can help others.">A bubble dragon</button></div>
+        <details><summary>Add story details</summary><div class="details-content">
+          <label for="words">Words to include</label><input id="words" name="Words" maxlength="4096" placeholder="fox, seed, patient">
+          <label for="sentence">A sentence to include</label><input id="sentence" name="Random sentence" maxlength="4096" placeholder="Good things take time.">
+          <label for="features">Features</label><input id="features" name="Features" maxlength="4096" placeholder="Dialogue, MoralValue">
+          <p class="hint">These are requests. Sprout may miss them.</p>
+        </div></details>
+        <details><summary>Adjust the writing</summary><div class="details-content">
+          <label for="temperature">Temperature <output id="temperature-value" for="temperature">0.8</output></label>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.8">
+          <p class="hint">0 picks the most likely next word; higher values add variety.</p>
+          <label for="length">Story length</label><select id="length"><option value="128">Short · up to 128 tokens</option><option value="256" selected>Medium · up to 256 tokens</option><option value="512">Long · up to the context limit</option></select>
+        </div></details>
+        <div class="actions"><button id="write" class="primary" type="submit">Load model &amp; write</button><button id="stop" type="button" hidden>Stop</button></div>
+        <p id="download-note" class="hint">First use downloads about 126 MB of weights, plus the runtime. Prompts stay on your device. Writing can be slow on phones.</p>
+        <progress id="progress" max="1" value="0" hidden aria-label="Model download"></progress>
+        <p id="status" role="status" aria-live="polite">Ready when you are.</p>
+      </form>
+      <div class="story-page">
+        <div class="page-top"><span>Your story</span><button id="copy" type="button" disabled>Copy</button></div>
+        <div id="story" class="story" aria-label="Generated story" tabindex="0"><div class="empty"><svg viewBox="0 0 80 90" aria-hidden="true"><path d="M40 78V43M40 54C15 55 7 38 10 20c21-2 34 11 30 34ZM40 44C35 19 53 9 72 12c2 21-12 33-32 32Z"/><path class="ground" d="M22 79h36"/></svg><p>Every story starts<br>with something small.</p><span>Your words will appear here as Sprout writes.</span></div></div>
+        <div class="page-bottom"><span id="story-meta">Written by a small, imperfect model</span><span aria-hidden="true">✦</span></div>
+      </div>
+    </section>
+    <section class="about" aria-labelledby="about-title">
+      <div><h2 id="about-title">What grew from this experiment?</h2><p>A complete language model: byte-level tokenizer, eight transformer layers, pretraining, two controlled comparisons, instruction tuning, and cached generation. All built in plain Python and PyTorch.</p><a href="https://github.com/gnasseem/sprout#results">Read the results</a></div>
+      <div class="outcomes"><p><strong>19 / 20</strong><span>Test stories stopped on their own after instruction tuning.</span></p><p><strong>6 / 20</strong><span>Included every requested word. Following instructions remains a weakness.</span></p><p class="caveat">Sprout can repeat itself, change characters, or contradict its own story. It is a learning project with a 512-token context, not a general chat assistant. Outputs have not been evaluated for suitability for children.</p></div>
+    </section>
+  </main>
+  <footer><span>Made from scratch. Shared to learn from.</span><a href="https://github.com/gnasseem/sprout/blob/main/LICENSE">MIT license</a></footer>
+  <noscript><p class="no-script">Enable JavaScript to run the model, or <a href="https://github.com/gnasseem/sprout#run-locally">run the Python demo locally</a>.</p></noscript>
+</body>
+</html>

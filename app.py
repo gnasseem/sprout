@@ -55,8 +55,9 @@ def build(model, tok):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     local = Path(__file__).resolve().parent
-    parser.add_argument("--model", default=str(local if (local / "config.json").is_file()
-                                              else local / "checkpoints/release"))
+    bundle = local if (local / "config.json").is_file() else local / "checkpoints/release"
+    parser.add_argument("--model", default=str(bundle) if (bundle / "config.json").is_file()
+                        else "GeorgeCodesSometimes/sprout-instruct")
     parser.add_argument("--revision", help="Hub commit to load when --model is a model ID")
     parser.add_argument("--host", help="Server bind address; defaults to Gradio's environment setting")
     parser.add_argument("--port", type=int, default=7860)

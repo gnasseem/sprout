@@ -66,6 +66,8 @@ tags:
 
 A decoder-only model trained from scratch on TinyStoriesV2-GPT4 and instruction tuned on TinyStoriesInstruct. It has {params:,} parameters, {cfg['n_layer']} layers, width {cfg['dim']}, {cfg['n_head']} attention heads, a {cfg['ctx']}-token context, {architecture['pos']} positions, RMSNorm, SwiGLU, tied embeddings, and a {cfg['vocab']}-token byte-level BPE vocabulary.
 
+[Try the live browser demo](https://huggingface.co/spaces/GeorgeCodesSometimes/sprout). The static demo runs float32 ONNX weights on your device; prompts stay local.
+
 This bundle contains float32 inference weights at instruction step {step:,}. It excludes optimizer state, training data, credentials, and training dependencies. The tied embedding/output tensor is stored once and restored with `safetensors.torch.load_model`. `config.json` records weight and tokenizer SHA-256 checksums, source checkpoint SHA-256, source code commit, and the original training fingerprint.
 
 ## Run locally

@@ -4,5 +4,4 @@ __pycache__/
 data/
 checkpoints/
 wandb/
-plan.md
-launch.md
+.DS_Store
