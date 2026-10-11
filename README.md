@@ -1,5 +1,9 @@
 # Sprout
 
+**29.4M parameters · 1.57B training tokens · 0.391 bits per byte on held-out text · learned positions 1.36% worse than RoPE**
+
+[![Sprout writing a story in the browser](docs/demo.gif)](https://huggingface.co/spaces/GeorgeCodesSometimes/sprout)
+
 A **29.4 million parameter language model trained from scratch** to write simple English stories. Eight transformer layers, a byte-level BPE tokenizer, and a complete training-to-inference pipeline in plain PyTorch.
 
 **[Write a story in your browser](https://huggingface.co/spaces/GeorgeCodesSometimes/sprout)** · [Download the weights](https://huggingface.co/GeorgeCodesSometimes/sprout-instruct) · [Training and reproduction](docs/reproduction.md)
@@ -76,6 +80,14 @@ For example, one tuned output includes the requested sentence and two requested 
 > Once upon a time, there was a little furry cat. The cat liked to look out the window and watch the birds fly by. One day, the cat wanted to play with the birds, but they were too high up in the sky.
 
 ## What is inside
+
+```mermaid
+flowchart LR
+    tok["Tokenizer<br/>byte-level BPE, 4,096 tokens"] --> pre["Pretraining<br/>1.57B tokens"]
+    pre --> sft["Instruction tuning<br/>2.36M conversations"]
+    sft --> onnx["ONNX export<br/>checked against PyTorch"]
+    onnx --> web["Browser demo<br/>ONNX Runtime Web"]
+```
 
 | File | Purpose |
 | --- | --- |
